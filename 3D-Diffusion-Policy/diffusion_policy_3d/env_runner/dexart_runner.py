@@ -1,7 +1,9 @@
 import wandb
 import numpy as np
+import random
 import torch
 import collections
+import math
 import tqdm
 from termcolor import cprint
 from diffusion_policy_3d.env import DexArtEnv
@@ -25,6 +27,8 @@ class DexArtRunner(BaseRunner):
                  crf=22,
                  tqdm_interval_sec=5.0,
                  task_name=None,
+                 eval_seeds=None,
+                 episodes_per_seed=None,
                  ):
         super().__init__(output_dir)
         self.task_name = task_name
@@ -45,6 +49,15 @@ class DexArtRunner(BaseRunner):
 
         self.env_train = env_fn(is_test=False)
         self.episode_train = n_train
+        self.eval_seeds = None if eval_seeds is None else [
+            int(seed) for seed in eval_seeds
+        ]
+        self.episodes_per_seed = episodes_per_seed
+
+        if self.eval_seeds:
+            if episodes_per_seed is None or episodes_per_seed <= 0:
+                raise ValueError(
+                    'episodes_per_seed must be positive when eval_seeds is set')
 
         self.fps = fps
         self.crf = crf
@@ -64,58 +77,79 @@ class DexArtRunner(BaseRunner):
 
         all_returns_train = []
         all_success_rates_train = []
+        success_rates_by_seed = {}
+        returns_by_seed = {}
 
+        if self.eval_seeds:
+            episode_groups = [
+                (seed, self.episodes_per_seed) for seed in self.eval_seeds
+            ]
+        else:
+            episode_groups = [(None, self.episode_train)]
 
-        ##############################
-        # train env loop
-        for episode_id in tqdm.tqdm(range(self.episode_train), desc=f"DexArt {self.task_name} Train Env",leave=False, mininterval=self.tqdm_interval_sec):
-            # start rollout
-            obs = env_train.reset()
+        for seed, num_episodes in episode_groups:
+            if seed is not None:
+                random.seed(seed)
+                np.random.seed(seed)
+                torch.manual_seed(seed)
+                if torch.cuda.is_available():
+                    torch.cuda.manual_seed_all(seed)
+                env_train.seed(seed)
 
-            policy.reset()
+            group_returns = []
+            group_successes = []
+            seed_suffix = '' if seed is None else f' seed={seed}'
+            description = f"DexArt {self.task_name} Eval{seed_suffix}"
 
-            done = False
-            reward_sum = 0.
-            for step_id in range(self.max_steps):
-                # create obs dict
-                np_obs_dict = dict(obs)
-                # device transfer
-                obs_dict = dict_apply(np_obs_dict,
-                                      lambda x: torch.from_numpy(x).to(
-                                          device=device))
+            for episode_id in tqdm.tqdm(
+                    range(num_episodes), desc=description, leave=False,
+                    mininterval=self.tqdm_interval_sec):
+                obs = env_train.reset()
 
-                # run policy
-                with torch.no_grad():
-                    # add batch dim to match. (1,2,3,84,84)
-                    # and multiply by 255, align with all envs
-                    obs_dict_input = {}  # flush unused keys
-                    obs_dict_input['point_cloud'] = obs_dict['point_cloud'].unsqueeze(0)
-                    obs_dict_input['imagin_robot'] = obs_dict['imagin_robot'].unsqueeze(0)
-                    obs_dict_input['agent_pos'] = obs_dict['agent_pos'].unsqueeze(0)
-                    action_dict = policy.predict_action(obs_dict_input)
+                policy.reset()
 
+                done = False
+                reward_sum = 0.
+                for step_id in range(self.max_steps):
+                    np_obs_dict = dict(obs)
+                    obs_dict = dict_apply(
+                        np_obs_dict,
+                        lambda x: torch.from_numpy(x).to(device=device))
 
-                # device_transfer
-                np_action_dict = dict_apply(action_dict,
-                                            lambda x: x.detach().to('cpu').numpy())
+                    with torch.no_grad():
+                        obs_dict_input = {}
+                        obs_dict_input['point_cloud'] = obs_dict[
+                            'point_cloud'].unsqueeze(0)
+                        obs_dict_input['imagin_robot'] = obs_dict[
+                            'imagin_robot'].unsqueeze(0)
+                        obs_dict_input['agent_pos'] = obs_dict[
+                            'agent_pos'].unsqueeze(0)
+                        action_dict = policy.predict_action(obs_dict_input)
 
-                action = np_action_dict['action'].squeeze(0)
+                    np_action_dict = dict_apply(
+                        action_dict,
+                        lambda x: x.detach().to('cpu').numpy())
+                    action = np_action_dict['action'].squeeze(0)
 
-                # step env
-                obs, reward, done, info = env_train.step(action)
-                reward_sum += reward
-                done = np.all(done)
+                    obs, reward, done, info = env_train.step(action)
+                    reward_sum += reward
+                    done = np.all(done)
 
-                if done:
-                    break
+                    if done:
+                        break
 
-            all_returns_train.append(reward_sum)
-            all_success_rates_train.append(env_train.is_success())
+                success = bool(env_train.is_success())
+                group_returns.append(float(reward_sum))
+                group_successes.append(success)
+                all_returns_train.append(float(reward_sum))
+                all_success_rates_train.append(success)
 
-       
+            if seed is not None:
+                success_rates_by_seed[seed] = float(np.mean(group_successes))
+                returns_by_seed[seed] = float(np.mean(group_returns))
 
-        SR_mean_train = np.mean(all_success_rates_train)
-        returns_mean_train = np.mean(all_returns_train)
+        SR_mean_train = float(np.mean(all_success_rates_train))
+        returns_mean_train = float(np.mean(all_returns_train))
 
         # log
         max_rewards = collections.defaultdict(list)
@@ -125,6 +159,30 @@ class DexArtRunner(BaseRunner):
         log_data['mean_returns_train'] = returns_mean_train
 
         log_data['test_mean_score'] = SR_mean_train
+        log_data['eval_num_episodes'] = len(all_success_rates_train)
+        log_data['eval_num_successes'] = int(np.sum(all_success_rates_train))
+
+        if success_rates_by_seed:
+            seed_rates = list(success_rates_by_seed.values())
+            seed_std = float(np.std(seed_rates, ddof=1)) \
+                if len(seed_rates) > 1 else 0.0
+            log_data['eval_success_rate_seed_std'] = seed_std
+            for seed, success_rate in success_rates_by_seed.items():
+                log_data[f'eval_success_rate_seed_{seed}'] = success_rate
+                log_data[f'eval_mean_return_seed_{seed}'] = returns_by_seed[seed]
+
+        # Wilson interval is more reliable than p +/- z*SE near 0 and 1.
+        num_episodes = len(all_success_rates_train)
+        z = 1.959963984540054
+        z_squared = z ** 2
+        denominator = 1 + z_squared / num_episodes
+        center = (SR_mean_train + z_squared / (2 * num_episodes)) / denominator
+        margin = z * math.sqrt(
+            (SR_mean_train * (1 - SR_mean_train)
+             + z_squared / (4 * num_episodes)) / num_episodes
+        ) / denominator
+        log_data['eval_success_rate_ci95_low'] = float(center - margin)
+        log_data['eval_success_rate_ci95_high'] = float(center + margin)
 
         self.logger_util_train.record(SR_mean_train)
         self.logger_util_train10.record(SR_mean_train)
@@ -133,7 +191,17 @@ class DexArtRunner(BaseRunner):
         log_data['SR_train_L5'] = self.logger_util_train10.average_of_largest_K()
         
 
-        cprint( f"Mean SR train: {SR_mean_train:.3f}", 'green')
+        if success_rates_by_seed:
+            formatted_rates = ', '.join(
+                f'{seed}:{rate:.3f}'
+                for seed, rate in success_rates_by_seed.items())
+            cprint(f'SR by seed: {formatted_rates}', 'green')
+        cprint(
+            f'Mean SR: {SR_mean_train:.3f} '
+            f'({log_data["eval_num_successes"]}/{num_episodes}), '
+            f'95% CI [{log_data["eval_success_rate_ci95_low"]:.3f}, '
+            f'{log_data["eval_success_rate_ci95_high"]:.3f}]',
+            'green')
 
         # visualize sim
         videos_train = env_train.env.get_video()

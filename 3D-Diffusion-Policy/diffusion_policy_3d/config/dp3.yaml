@@ -115,6 +115,13 @@ training:
   max_val_steps: null
   tqdm_interval_sec: 1.0
 
+# Standalone eval.py settings. Periodic training rollouts keep the task's
+# original n_train value (20 for DexArt).
+evaluation:
+  seeds: [0, 1, 2, 3, 4]
+  episodes_per_seed: 20
+  checkpoint: latest
+
 logging:
   group: ${exp_name}
   id: null

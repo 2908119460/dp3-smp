@@ -1,0 +1,164 @@
+defaults:
+  - task: dexart_multitask
+  - smp: default
+  - _self_
+
+name: train_smp_dp3
+task_name: ${task.name}
+shape_meta: ${task.shape_meta}
+exp_name: smp_dp3_dense
+
+horizon: 16
+n_obs_steps: 2
+n_action_steps: 8
+n_latency_steps: 0
+dataset_obs_steps: ${n_obs_steps}
+obs_as_global_cond: true
+
+policy:
+  _target_: diffusion_policy_3d.policy.smp_dp3.SMPDP3Policy
+  shape_meta: ${shape_meta}
+  horizon: ${horizon}
+  n_action_steps: ${n_action_steps}
+  n_obs_steps: ${n_obs_steps}
+  num_tasks: ${smp.num_tasks}
+  num_experts: ${smp.num_experts}
+  task_embed_dim: ${smp.task_embed_dim}
+  state_dim: ${smp.state_dim}
+  basis_hidden_dim: ${smp.basis.hidden_dim}
+  basis_qr_fp32: ${smp.basis.qr_fp32}
+  basis_sign_stabilization: ${smp.basis.sign_stabilization}
+  gate_hidden_dim: ${smp.gate.hidden_dim}
+  min_concentration: ${smp.gate.min_concentration}
+  global_initial_concentration: ${smp.gate.alpha}
+  alpha: ${smp.gate.alpha}
+  alpha0: ${smp.gate.alpha0}
+  kappa: ${smp.gate.kappa}
+  coefficient_eps: ${smp.gate.coefficient_eps}
+  action_likelihood_std: ${smp.loss.action_likelihood_std}
+  coeff_weight: ${smp.loss.coeff_weight}
+  recon_weight: ${smp.loss.recon_weight}
+  gate_weight: ${smp.loss.gate_weight}
+  align_weight: ${smp.loss.align_weight}
+  expert_down_dims: ${smp.experts.down_dims}
+  expert_diffusion_step_embed_dim: ${smp.experts.diffusion_step_embed_dim}
+  expert_kernel_size: ${smp.experts.kernel_size}
+  expert_n_groups: ${smp.experts.n_groups}
+  encoder_output_dim: 64
+  use_pc_color: false
+  pointnet_type: pointnet
+  pointcloud_encoder_cfg:
+    in_channels: 3
+    out_channels: ${policy.encoder_output_dim}
+    use_layernorm: true
+    final_norm: layernorm
+    normal_channel: false
+  noise_scheduler:
+    _target_: diffusers.schedulers.scheduling_ddim.DDIMScheduler
+    num_train_timesteps: ${smp.experts.num_train_timesteps}
+    beta_start: 0.0001
+    beta_end: 0.02
+    beta_schedule: squaredcos_cap_v2
+    clip_sample: false
+    set_alpha_to_one: true
+    steps_offset: 0
+    prediction_type: ${smp.experts.prediction_type}
+  num_inference_steps: 10
+
+ema:
+  _target_: diffusion_policy_3d.model.diffusion.ema_model.EMAModel
+  update_after_step: 0
+  inv_gamma: 1.0
+  power: 0.75
+  min_value: 0.0
+  max_value: 0.9999
+
+dataloader:
+  batch_size: 64
+  num_workers: 8
+  shuffle: true
+  pin_memory: true
+  persistent_workers: false
+
+val_dataloader:
+  batch_size: 64
+  num_workers: 8
+  shuffle: false
+  pin_memory: true
+  persistent_workers: false
+
+optimizer:
+  _target_: torch.optim.AdamW
+  lr: 1.0e-4
+  betas: [0.95, 0.999]
+  eps: 1.0e-8
+  weight_decay: 1.0e-6
+
+training:
+  device: cuda:0
+  seed: 42
+  debug: false
+  resume: true
+  lr_scheduler: cosine
+  lr_warmup_steps: 500
+  # 训练循环使用右开区间，因此 2001 表示最后执行 epoch 2000。
+  num_epochs: 3001
+  resume_to_total_epochs: true
+  restart_lr_scheduler: true
+  resume_lr: 1.0e-6
+  resume_lr_warmup_steps: 0
+  gradient_accumulate_every: 1
+  use_ema: true
+  run_rollout: true
+  run_validation: false
+  rollout_every: 100
+  checkpoint_every: 100
+  val_every: 1
+  sample_every: 100
+  max_train_steps: null
+  max_val_steps: null
+  tqdm_interval_sec: 1.0
+
+# 独立评测和周期评测统一使用 5 个 seed，每个 seed 运行 20 个 episode。
+evaluation:
+  seeds: [0, 1, 2, 3, 4]
+  episodes_per_seed: 20
+  checkpoint: latest
+  epoch: null
+
+task:
+  env_runner:
+    eval_seeds: ${evaluation.seeds}
+    episodes_per_seed: ${evaluation.episodes_per_seed}
+
+logging:
+  group: ${exp_name}
+  id: null
+  mode: online
+  name: ${training.seed}
+  project: smp-dp3
+  resume: true
+  tags: [smp, dp3, dexart, multitask]
+
+checkpoint:
+  save_ckpt: true
+  topk:
+    monitor_key: train_loss
+    mode: min
+    k: 1
+    format_str: epoch={epoch:04d}-train_loss={train_loss:.3f}.ckpt
+  save_last_ckpt: true
+  save_last_snapshot: false
+
+multi_run:
+  run_dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  wandb_name_base: ${now:%Y.%m.%d-%H.%M.%S}_${name}_${task_name}
+
+hydra:
+  job:
+    override_dirname: ${name}
+  run:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+  sweep:
+    dir: data/outputs/${now:%Y.%m.%d}/${now:%H.%M.%S}_${name}_${task_name}
+    subdir: ${hydra.job.num}

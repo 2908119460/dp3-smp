@@ -88,13 +88,27 @@ class TrainDP3Workspace:
             verbose = False
         
         RUN_VALIDATION = False # reduce time cost
+        if 'run_rollout' in cfg.training:
+            RUN_ROLLOUT = cfg.training.run_rollout
+        if 'run_validation' in cfg.training:
+            RUN_VALIDATION = cfg.training.run_validation
         
         # resume training
+        resumed_from_checkpoint = False
         if cfg.training.resume:
             lastest_ckpt_path = self.get_checkpoint_path()
             if lastest_ckpt_path.is_file():
                 print(f"Resuming from checkpoint {lastest_ckpt_path}")
                 self.load_checkpoint(path=lastest_ckpt_path)
+                resumed_from_checkpoint = True
+
+        # Checkpoints are written after an epoch finishes but before these
+        # counters advance at the bottom of the loop. Opt in to exact
+        # total-epoch continuation when recovering an interrupted run.
+        resume_to_total_epochs = cfg.training.get('resume_to_total_epochs', False)
+        if resumed_from_checkpoint and resume_to_total_epochs:
+            self.global_step += 1
+            self.epoch += 1
 
         # configure dataset
         dataset: BaseDataset
@@ -113,16 +127,32 @@ class TrainDP3Workspace:
             self.ema_model.set_normalizer(normalizer)
 
         # configure lr scheduler
+        scheduler_num_epochs = cfg.training.num_epochs
+        scheduler_warmup_steps = cfg.training.lr_warmup_steps
+        scheduler_last_epoch = self.global_step - 1
+        if resumed_from_checkpoint and cfg.training.get(
+                'restart_lr_scheduler', False):
+            resume_lr = float(cfg.training.resume_lr)
+            for param_group in self.optimizer.param_groups:
+                param_group['lr'] = resume_lr
+                param_group['initial_lr'] = resume_lr
+            scheduler_num_epochs = cfg.training.num_epochs
+            if resume_to_total_epochs:
+                scheduler_num_epochs = max(
+                    cfg.training.num_epochs - self.epoch, 1)
+            scheduler_warmup_steps = int(
+                cfg.training.get('resume_lr_warmup_steps', 0))
+            scheduler_last_epoch = -1
         lr_scheduler = get_scheduler(
             cfg.training.lr_scheduler,
             optimizer=self.optimizer,
-            num_warmup_steps=cfg.training.lr_warmup_steps,
+            num_warmup_steps=scheduler_warmup_steps,
             num_training_steps=(
-                len(train_dataloader) * cfg.training.num_epochs) \
+                len(train_dataloader) * scheduler_num_epochs) \
                     // cfg.training.gradient_accumulate_every,
             # pytorch assumes stepping LRScheduler every epoch
             # however huggingface diffusers steps it every batch
-            last_epoch=self.global_step-1
+            last_epoch=scheduler_last_epoch
         )
 
         # configure ema
@@ -177,7 +207,10 @@ class TrainDP3Workspace:
 
         # training loop
         log_path = os.path.join(self.output_dir, 'logs.json.txt')
-        for local_epoch_idx in range(cfg.training.num_epochs):
+        num_epochs_to_run = cfg.training.num_epochs
+        if resume_to_total_epochs:
+            num_epochs_to_run = max(cfg.training.num_epochs - self.epoch, 0)
+        for local_epoch_idx in range(num_epochs_to_run):
             step_log = dict()
             # ========= train for this epoch ==========
             train_losses = list()
@@ -253,12 +286,22 @@ class TrainDP3Workspace:
             # run rollout
             if (self.epoch % cfg.training.rollout_every) == 0 and RUN_ROLLOUT and env_runner is not None:
                 t3 = time.time()
+                env_runner.evaluation_epoch = int(self.epoch)
                 # runner_log = env_runner.run(policy, dataset=dataset)
                 runner_log = env_runner.run(policy)
                 t4 = time.time()
                 # print(f"rollout time: {t4-t3:.3f}")
                 # log all
                 step_log.update(runner_log)
+                score_items = [
+                    f'{key}={float(value):.4f}'
+                    for key, value in runner_log.items()
+                    if key == 'test_mean_score'
+                    or key.endswith('/test_mean_score')
+                ]
+                cprint(
+                    f'Rollout epoch {self.epoch}: ' + ', '.join(score_items),
+                    'green')
 
             
                 
@@ -288,7 +331,11 @@ class TrainDP3Workspace:
                     obs_dict = batch['obs']
                     gt_action = batch['action']
                     
-                    result = policy.predict_action(obs_dict)
+                    if 'task_id' in batch:
+                        result = policy.predict_action(
+                            obs_dict, task_id=batch['task_id'])
+                    else:
+                        result = policy.predict_action(obs_dict)
                     pred_action = result['action_pred']
                     mse = torch.nn.functional.mse_loss(pred_action, gt_action)
                     step_log['train_action_mse_error'] = mse.item()
@@ -299,7 +346,7 @@ class TrainDP3Workspace:
                     del pred_action
                     del mse
 
-            if env_runner is None:
+            if env_runner is None or not RUN_ROLLOUT:
                 step_log['test_mean_score'] = - train_loss
                 
             # checkpoint
@@ -334,14 +381,37 @@ class TrainDP3Workspace:
             del step_log
 
     def eval(self):
-        # load the latest checkpoint
-        
         cfg = copy.deepcopy(self.cfg)
-        
-        lastest_ckpt_path = self.get_checkpoint_path(tag="latest")
-        if lastest_ckpt_path.is_file():
-            cprint(f"Resuming from checkpoint {lastest_ckpt_path}", 'magenta')
-            self.load_checkpoint(path=lastest_ckpt_path)
+
+        checkpoint_name = str(cfg.get('evaluation', {}).get(
+            'checkpoint', 'latest'))
+        if checkpoint_name == 'latest':
+            eval_ckpt_path = self.get_checkpoint_path(tag='latest')
+        elif checkpoint_name == 'best':
+            checkpoint_dir = pathlib.Path(self.output_dir).joinpath(
+                'checkpoints')
+            candidates = list(checkpoint_dir.glob(
+                'epoch=*-test_mean_score=*.ckpt'))
+            if not candidates:
+                raise FileNotFoundError(
+                    f'No best checkpoint found in {checkpoint_dir}')
+
+            def checkpoint_score(path):
+                return float(path.name.split(
+                    'test_mean_score=', 1)[1].rsplit('.ckpt', 1)[0])
+
+            eval_ckpt_path = max(candidates, key=checkpoint_score)
+        else:
+            eval_ckpt_path = pathlib.Path(checkpoint_name)
+            if not eval_ckpt_path.is_absolute():
+                eval_ckpt_path = pathlib.Path(self.output_dir).joinpath(
+                    eval_ckpt_path)
+
+        if not eval_ckpt_path.is_file():
+            raise FileNotFoundError(
+                f'Evaluation checkpoint not found: {eval_ckpt_path}')
+        cprint(f"Resuming from checkpoint {eval_ckpt_path}", 'magenta')
+        self.load_checkpoint(path=eval_ckpt_path)
         
         # configure env
         env_runner: BaseRunner
@@ -349,13 +419,26 @@ class TrainDP3Workspace:
             cfg.task.env_runner,
             output_dir=self.output_dir)
         assert isinstance(env_runner, BaseRunner)
+        evaluation_epoch = cfg.get('evaluation', {}).get('epoch')
+        if evaluation_epoch is not None and hasattr(
+                env_runner, 'evaluation_epoch'):
+            env_runner.evaluation_epoch = int(evaluation_epoch)
         policy = self.model
         if cfg.training.use_ema:
             policy = self.ema_model
         policy.eval()
         policy.cuda()
 
+        cfg.logging.name = str(cfg.logging.name)
+        wandb_run = wandb.init(
+            dir=str(self.output_dir),
+            config=OmegaConf.to_container(cfg, resolve=True),
+            **cfg.logging
+        )
+
         runner_log = env_runner.run(policy)
+        wandb_run.log(runner_log)
+        wandb_run.finish()
         
       
         cprint(f"---------------- Eval Results --------------", 'magenta')

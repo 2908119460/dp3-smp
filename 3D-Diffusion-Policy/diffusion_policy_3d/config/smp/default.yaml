@@ -1,0 +1,37 @@
+num_experts: 4
+num_tasks: 4
+task_embed_dim: 16
+state_dim: 256
+
+basis:
+  hidden_dim: 256
+  qr_fp32: true
+  sign_stabilization: true
+
+gate:
+  hidden_dim: 256
+  alpha: 2.0
+  alpha0: 0.5
+  kappa: 20.0
+  min_concentration: 1.0e-4
+  coefficient_eps: 1.0e-3
+
+experts:
+  down_dims: [64, 128, 256]
+  diffusion_step_embed_dim: 128
+  kernel_size: 3
+  n_groups: 8
+  prediction_type: epsilon
+  num_train_timesteps: 100
+
+loss:
+  # 论文 Eq. (35) 未报告 sigma_a 数值；1.0 是中性初值，训练前需重新校准。
+  action_likelihood_std: 1.0
+  coeff_weight: 1.0
+  recon_weight: 1.0
+  gate_weight: 1.0
+  align_weight: 1.0
+
+inference:
+  sparse: false
+  mass_threshold: 0.95

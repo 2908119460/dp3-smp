@@ -25,6 +25,8 @@ def parse_args():
     parser.add_argument('--num_episodes', type=int, default=10, help='number of total episodes')
     parser.add_argument('--use_test_set', dest='use_test_set', action='store_true', default=False)
     parser.add_argument('--root_dir', type=str, default='data', help='directory to save data')
+    parser.add_argument('--output_path', type=str, default=None,
+                        help='explicit output zarr path; must not already exist')
     parser.add_argument('--img_size', type=int, default=84, help='image size')
     parser.add_argument('--num_points', type=int, default=1024, help='number of points in point cloud')
     args = parser.parse_args()
@@ -47,8 +49,11 @@ def main():
     checkpoint_path = args.checkpoint_path
     
 
-    save_dir = os.path.join(args.root_dir, 'dexart_'+args.task_name+'_expert.zarr')
+    save_dir = args.output_path or os.path.join(
+        args.root_dir, 'dexart_'+args.task_name+'_expert.zarr')
     if os.path.exists(save_dir):
+        if args.output_path is not None:
+            raise FileExistsError('Output already exists: {}'.format(save_dir))
         cprint('Data already exists at {}'.format(save_dir), 'red')
         cprint("If you want to overwrite, delete the existing directory first.", "red")
         cprint("Do you want to overwrite? (y/n)", "red")

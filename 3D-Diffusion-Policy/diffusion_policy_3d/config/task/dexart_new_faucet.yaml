@@ -1,6 +1,6 @@
-name: dexart_bucket
+name: dexart_new_faucet
 
-task_name: bucket
+task_name: faucet
 
 shape_meta: &shape_meta
   # acceptable types: rgb, low_dim
@@ -15,7 +15,7 @@ shape_meta: &shape_meta
         shape: [3, 84, 84]
         type: rgb
     agent_pos:
-      shape: [33]
+      shape: [32]
       type: low_dim
   action:
     shape: [22]
@@ -23,15 +23,15 @@ shape_meta: &shape_meta
 env_runner:
   _target_: diffusion_policy_3d.env_runner.dexart_runner.DexArtRunner
   n_train: 20
-  max_steps: 100
+  max_steps: 50
   n_obs_steps: ${n_obs_steps}
   n_action_steps: ${n_action_steps}
   fps: 10
-  task_name: bucket
+  task_name: faucet
 
 dataset:
   _target_: diffusion_policy_3d.dataset.dexart_dataset.DexArtDataset
-  zarr_path: data/dexart_bucket_expert.zarr
+  zarr_path: data/dexart_faucet_new.zarr
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps}-1'}
   pad_after: ${eval:'${n_action_steps}-1'}

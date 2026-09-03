@@ -13,7 +13,8 @@ class SawyerHandlePressSideV2Policy(Policy):
             'hand_pos': obs[:3],
             'gripper': obs[3],
             'handle_pos': obs[4:7],
-            'unused_info': obs[7:],
+            'unused_info': obs[7:-3],
+            'goal_pos': obs[-3:],
         }
 
     def get_action(self, obs):
@@ -37,4 +38,6 @@ class SawyerHandlePressSideV2Policy(Policy):
         if np.linalg.norm(pos_curr[:2] - pos_button[:2]) > 0.02:
             return pos_button + np.array([0., 0., 0.2])
         else:
-            return pos_button + np.array([.0, .0, -.5])
+            desired_pos = pos_curr.copy()
+            desired_pos[2] -= 0.5 * (pos_button[2] - o_d['goal_pos'][2])
+            return desired_pos

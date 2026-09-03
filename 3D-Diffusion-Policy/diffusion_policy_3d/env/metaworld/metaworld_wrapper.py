@@ -15,6 +15,7 @@ from diffusion_policy_3d.gym_util.mjpc_wrapper import point_cloud_sampling
 
 TASK_BOUDNS = {
     'default': [-0.5, -1.5, -0.795, 1, -0.4, 100],
+    'sweep-v2-goal-observable': [-0.5, -1.5, -0.795, 1, -0.25, 100],
 }
 
 class MetaWorldEnv(gym.Env):
@@ -237,4 +238,3 @@ class MetaWorldEnv(gym.Env):
 
     def close(self):
         pass
-

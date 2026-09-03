@@ -1,5 +1,6 @@
 import gym
 import numpy as np
+import random
 import torch
 import pytorch3d.ops as torch3d_ops
 
@@ -99,6 +100,8 @@ class DexArtEnv(gym.Env):
         if obs_pointcloud.shape[0] > self.num_points:
             obs_pointcloud = downsample_with_fps(
                 obs_pointcloud, self.num_points)
+        # DexArt 偶尔附带 RGB 三列；此处统一为模型约定的 XYZ 点云。
+        obs_pointcloud = obs_pointcloud[..., :3]
         obs_imagin_robot = obs['imagination_robot']  # (96, 7)
 
         if obs_pixels.shape[0] != 3:  # make channel first
@@ -122,6 +125,8 @@ class DexArtEnv(gym.Env):
         if obs_pointcloud.shape[0] > self.num_points:
             obs_pointcloud = downsample_with_fps(
                 obs_pointcloud, self.num_points)
+        # DexArt 偶尔附带 RGB 三列；此处统一为模型约定的 XYZ 点云。
+        obs_pointcloud = obs_pointcloud[..., :3]
         obs_imagin_robot = obs['imagination_robot']  # (96, 7)
 
         if obs_pixels.shape[0] != 3:  # make channel first
@@ -141,6 +146,11 @@ class DexArtEnv(gym.Env):
             seed = np.random.randint(0, 25536)
         self._seed = seed
         self.np_random = np.random.default_rng(seed)
+        np.random.seed(seed)
+        random.seed(seed)
+        if hasattr(self.env, 'seed'):
+            self.env.seed(seed)
+        return [seed]
 
     def get_visual_observation(self):
         return self.env.get_visual_observation()

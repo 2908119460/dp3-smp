@@ -1,0 +1,55 @@
+defaults:
+  - smp_dp3
+  - override /task: dexart_multitask_new_bucket
+  - _self_
+
+name: train_smp_dp3_adaptive_multi_gpu
+exp_name: dexart-smp-expert8
+
+smp:
+  num_experts: 8
+  inference:
+    sparse: true
+
+policy:
+  _target_: diffusion_policy_3d.policy.adaptive_smp_dp3_policy.AdaptiveSMPDP3Policy
+  adaptive_inference: ${smp.inference.sparse}
+  importance_mass_threshold: ${smp.inference.mass_threshold}
+
+distributed:
+  backend: nccl
+  timeout_minutes: 180
+  find_unused_parameters: false
+  output_dir: data/outputs/${exp_name}
+
+dataloader:
+  batch_size: 32
+  num_workers: 2
+  persistent_workers: true
+
+training:
+  device: cuda
+  num_epochs: 1500
+  resume: false
+  run_rollout: true
+  run_validation: false
+  rollout_every: 100
+  checkpoint_every: 100
+  sample_every: 100
+
+logging:
+  mode: disabled
+
+checkpoint:
+  topk:
+    monitor_key: train_loss
+    mode: min
+    format_str: 'epoch={epoch:04d}-train_loss={train_loss:.3f}.ckpt'
+
+hydra:
+  job:
+    chdir: false
+  run:
+    dir: ${distributed.output_dir}/hydra_rank_${oc.env:LOCAL_RANK,0}
+  sweep:
+    dir: ${distributed.output_dir}/hydra_rank_${oc.env:LOCAL_RANK,0}

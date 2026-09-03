@@ -1,0 +1,48 @@
+name: dexart_multitask_new_bucket
+task_name: dexart_multitask
+
+shape_meta:
+  obs:
+    point_cloud:
+      shape: [1024, 3]
+      type: point_cloud
+    imagin_robot:
+      shape: [96, 7]
+      type: point_cloud
+    agent_pos:
+      shape: [33]
+      type: low_dim
+  action:
+    shape: [22]
+
+task_names: [faucet, bucket, laptop, toilet]
+
+env_runner:
+  _target_: diffusion_policy_3d.env_runner.multi_task_dexart_runner.MultiTaskDexArtRunner
+  task_names: ${task.task_names}
+  n_train: 20
+  max_steps: 50
+  max_steps_by_task:
+    bucket: 100
+  n_obs_steps: ${n_obs_steps}
+  n_action_steps: ${n_action_steps}
+  fps: 10
+
+dataset:
+  _target_: diffusion_policy_3d.dataset.multi_task_dexart_dataset.MultiTaskDexArtDataset
+  tasks:
+    - name: faucet
+      zarr_path: data/dexart_faucet_expert.zarr
+    - name: bucket
+      zarr_path: data/dexart_bucket_new.zarr
+    - name: laptop
+      zarr_path: data/dexart_laptop_expert.zarr
+    - name: toilet
+      zarr_path: data/dexart_toilet_expert.zarr
+  state_dim: 33
+  horizon: ${horizon}
+  pad_before: ${eval:'${n_obs_steps}-1'}
+  pad_after: ${eval:'${n_action_steps}-1'}
+  seed: ${training.seed}
+  val_ratio: 0.02
+  max_train_episodes: 90

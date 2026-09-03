@@ -1,4 +1,4 @@
-name: dexart_bucket
+name: dexart_new_bucket
 
 task_name: bucket
 
@@ -31,7 +31,7 @@ env_runner:
 
 dataset:
   _target_: diffusion_policy_3d.dataset.dexart_dataset.DexArtDataset
-  zarr_path: data/dexart_bucket_expert.zarr
+  zarr_path: data/dexart_bucket_new.zarr
   horizon: ${horizon}
   pad_before: ${eval:'${n_obs_steps}-1'}
   pad_after: ${eval:'${n_action_steps}-1'}
